@@ -1,46 +1,74 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 )
 
-func generator(nums ...int) <-chan int {
+func generator(ctx context.Context, nums ...int) <-chan int {
 	out := make(chan int)
 
 	go func() {
+		defer close(out)
+
 		for _, n := range nums {
-			out <- n
+			select {
+			case <-ctx.Done():
+				fmt.Println("Получили сигнал отмены...")
+				return
+			case out <- n:
+			}
 		}
-		close(out)
 	}()
 
 	return out
 }
 
-func worker(in <-chan int, workerId int) <-chan int {
+func worker(ctx context.Context, cancel context.CancelFunc, in <-chan int, workerId int) <-chan int {
 	out := make(chan int)
 
 	go func() {
+		defer close(out)
 		for n := range in {
+			select {
+			case <-ctx.Done():
+				fmt.Printf("[Воркер %d] Контекст отменён\r\n", workerId)
+				return
+			default:
+			}
+
 			time.Sleep(300 * time.Millisecond)
-			fmt.Printf("[Воркер %d] Обрабатывает число: %d\r\n", workerId, n)
-			out <- n * n
+			if n == 5 {
+				fmt.Printf("[Воркер %d] поймал триггер!!! отменяем всё %d\r\n", workerId, n)
+				cancel()
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case out <- n * n:
+				fmt.Printf("[Воркер %d] Обрабатывает число: %d\r\n", workerId, n)
+			}
+
 		}
-		close(out)
 	}()
 	return out
 }
 
-func fanIn(channels ...<-chan int) <-chan int {
+func fanIn(ctx context.Context, channels ...<-chan int) <-chan int {
 	var wg sync.WaitGroup
 
 	multiplexedStream := make(chan int)
 	multiplex := func(c <-chan int) {
 		defer wg.Done()
 		for n := range c {
-			multiplexedStream <- n
+			select {
+			case <-ctx.Done():
+				return
+			case multiplexedStream <- n:
+			}
 		}
 	}
 
@@ -58,15 +86,22 @@ func fanIn(channels ...<-chan int) <-chan int {
 }
 
 func main() {
-	inputChan := generator(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
 
-	w1 := worker(inputChan, 1)
-	w2 := worker(inputChan, 2)
-	w3 := worker(inputChan, 3)
-	finalResultChan := fanIn(w1, w2, w3)
+	ctx, cancel := context.WithCancel(context.Background())
+	inputChan := generator(ctx, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
+
+	w1 := worker(ctx, cancel, inputChan, 1)
+	w2 := worker(ctx, cancel, inputChan, 2)
+	w3 := worker(ctx, cancel, inputChan, 3)
+	finalResultChan := fanIn(ctx, w1, w2, w3)
 
 	for result := range finalResultChan {
 		fmt.Println(result)
+	}
 
+	if ctx.Err() != nil {
+		fmt.Println("Прервано ошибкой")
+	} else {
+		fmt.Println("Нормальное завершение")
 	}
 }
